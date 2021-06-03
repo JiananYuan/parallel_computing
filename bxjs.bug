@@ -1,0 +1,271 @@
+#include "mpi.h"
+#include <math.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <iostream>
+#include <time.h>
+using namespace std;
+const double esp = 1e-6;
+
+// 根据处理器的逻辑行号和逻辑列号求出处理器的实际编号
+// +sp是因为存在循环的情况，避免出现异常(求出来都是正数)
+int get_cpu_index(int cpu_row_index, int cpu_col_index, int sp) {
+	return ((cpu_row_index + sp) % sp) * sp + ((cpu_col_index + sp) % sp);
+}
+
+// 浮点数判等
+bool isEqual(double x, double y) {
+	return fabs(x - y) < esp;
+}
+
+
+int main(int argc, char** argv) {
+	const int n = 25;  // 矩阵大小
+	int rank, p; // rank 处理器编号  p 处理器数
+	MPI_Init(&argc, &argv);
+	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+	MPI_Comm_size(MPI_COMM_WORLD, &p);
+
+	MPI_Status status;
+	double tb, te; // 开始计时器和结束计时器
+	int sp = (int)sqrt((double)p);
+
+	// 对n适当调整，使得每个处理器处理的都是方阵
+	// m是调整后的矩阵规模
+	int m = n;
+	while (m%sp) {
+		++m;
+	}
+
+	int cpu_row_index = rank / sp; // 求当前处理器的逻辑行号
+	int cpu_col_index = rank % sp; // 求当前处理器的逻辑列号
+	int block_edge_size = m / sp; // 块宽度
+	int block_size = block_edge_size*block_edge_size; // 块大小
+
+	// a b c 是处理器管理的属于自己那部分的矩阵数据块
+	// tmp_a tmp_b 用作消息传递的数组
+	double *a = new double[block_size];
+	double *b = new double[block_size];
+	double *c = new double[block_size];
+	double *tmp_a = new double[block_size];
+	double *tmp_b = new double[block_size];
+
+	// 0号进程初始化随机矩阵
+	// 计算串行乘法的结果
+	// 将源A，B矩阵的分块从0号处理器发送给其他的处理器
+	if (rank == 0) {
+		double** A = new double*[m];
+		for (int i = 0; i < m; ++i) 
+			A[i] = new double[m];
+		double** B = new double*[m];
+		for (int i = 0; i < m; ++i) 
+			B[i] = new double[m];
+		double** C = new double*[m];
+		for (int i = 0; i < m; ++i) 
+			C[i] = new double[m];
+		double** C_C = new double*[m];
+		for (int i = 0; i < m; ++i) 
+			C_C[i] = new double[m];
+		/*
+		double(*A)[m] = new double[m][m];
+		double(*B)[m] = new double[m][m];
+		double(*C)[m] = new double[m][m];
+		double(*C_C)[m] = new double[m][m]; // 存放串行结果
+		*/
+		// 生成随机矩阵
+		srand((unsigned)time(nullptr));
+		for (int i = 0; i < m; ++i) {
+			for (int j = 0; j < m; ++j) {
+				// 超界的置为0
+				if (i >= n || j >= n) {
+					A[i][j] = 0;
+					B[i][j] = 0;
+				}
+				A[i][j] = rand() * 1.0 / RAND_MAX;
+				B[i][j] = rand() * 1.0 / RAND_MAX;
+			}
+		}
+		// 串行运算
+		tb = MPI_Wtime();
+		for (int i = 0; i < m; ++i) {
+			for (int j = 0; j < m; ++j) {
+				double sum = 0;
+				for (int k = 0; k < m; ++k) {
+					sum += A[i][k] * B[k][j];
+				}
+				C_C[i][j] = sum;
+			}
+		}
+		te = MPI_Wtime();
+		cout << "串行时间：" << (te - tb) << "\n";
+		// 如果只有一个处理器，可以结束了
+		if (p == 1) {
+			MPI_Finalize();
+			return 0;
+		}
+
+		// 发送矩阵分块
+		// 将源A，B矩阵的分块从0号处理器发送给其他的处理器
+		// 遍历全部的处理器
+		for (int k = 0; k < p; ++k) {
+			int x1 = (k / sp) * block_edge_size; // 左边界x
+			int x2 = (k / sp + 1) * block_edge_size; // 右边界x
+			int y1 = (k % sp) * block_edge_size; // 左边界y
+			int y2 = ((k % sp) + 1) * block_edge_size; // 右边界y
+			// 将处理器所管理的块数据拷贝到tmp
+			int u = 0, v = 0;
+			for (int i = x1; i < x2; ++i) {
+				for (int j = y1; j < y2; ++j) {
+					tmp_a[u++] = A[i][j];
+					tmp_b[v++] = B[i][j];
+				}
+			}
+			// 0号进程拷贝数据给自己就行，对于其他处理器则需要0号处理机发送
+			if (k == 0) {
+				memcpy(a, tmp_a, block_size * sizeof(double));
+				memcpy(b, tmp_a, block_size * sizeof(double));
+			}
+			else {
+				MPI_Send(tmp_a, block_size, MPI_FLOAT, k, 1, MPI_COMM_WORLD);
+				MPI_Send(tmp_b, block_size, MPI_FLOAT, k, 2, MPI_COMM_WORLD);
+			}
+		}
+
+		// 开始MPI并行运算
+		tb = MPI_Wtime();
+		// 0号处理器完成自己那部分运算
+		// 接下来就是每计算一次后，按照Cannon的方式循环左移和上移，一共进行sp次
+		/*
+		MPI_Sendrecv(a, block_size, MPI_FLOAT, get_cpu_index(cpu_row_index, cpu_col_index - cpu_row_index, sp), 1,
+			tmp_a, block_size, MPI_FLOAT, get_cpu_index(cpu_row_index, cpu_col_index + cpu_row_index, sp), 1, MPI_COMM_WORLD, &status);
+		memcpy(a, tmp_a, block_size * sizeof(double));
+		MPI_Sendrecv(b, block_size, MPI_FLOAT, get_cpu_index(cpu_row_index - cpu_col_index, cpu_col_index, sp), 1,
+			tmp_b, block_size, MPI_FLOAT, get_cpu_index(cpu_row_index + cpu_col_index, cpu_col_index, sp), 1, MPI_COMM_WORLD, &status);
+		memcpy(b, tmp_b, block_size * sizeof(double));
+		*/
+		double total = 0;
+		for (int l = 0; l < sp; l++) {
+			// 小规模的矩阵乘法运算
+			for (int i = 0; i < block_edge_size; ++i) {
+				for (int j = 0; j < block_edge_size; ++j) {
+					total = c[i * block_edge_size + j];
+					for (int k = 0; k < block_edge_size; ++k) {
+						total += a[i * block_edge_size + k] * b[k * block_edge_size + j];
+					}
+					c[i * block_edge_size + j] = total;
+				}
+			}
+			// 将A全部循环左移1位，并更新自己所管理的数据
+			MPI_Sendrecv(a, block_size, MPI_FLOAT, get_cpu_index(cpu_row_index, cpu_col_index - 1, sp), 1,
+				tmp_a, block_size, MPI_FLOAT, get_cpu_index(cpu_row_index, cpu_col_index + 1, sp), 1, MPI_COMM_WORLD, &status);
+			memcpy(a, tmp_a, block_size * sizeof(double));
+			// 将B全部循环上移1位，并更新自己所管理的数据
+			MPI_Sendrecv(b, block_size, MPI_FLOAT, get_cpu_index(cpu_row_index - 1, cpu_col_index, sp), 1,
+				tmp_b, block_size, MPI_FLOAT, get_cpu_index(cpu_row_index + 1, cpu_col_index, sp), 1, MPI_COMM_WORLD, &status);
+			memcpy(b, tmp_b, block_size * sizeof(double));
+		}
+		// 将0号处理机结果赋值到相应区域
+		for (int i = 0; i < block_edge_size; ++i) {
+			for (int j = 0; j < block_edge_size; ++j) {
+				C[i][j] = c[i*block_edge_size + j];
+			}
+		}
+		// MPI_Barrier(MPI_COMM_WORLD);
+		// 接收剩余处理机结果并赋值到相应区域
+		for (int k = 1; k < p; ++k) {
+			MPI_Recv(c, block_size, MPI_FLOAT, k, 1, MPI_COMM_WORLD, &status);
+			int x1 = (k / sp) * block_edge_size;
+			int x2 = (k / sp + 1) * block_edge_size;
+			int y1 = (k % sp) * block_edge_size;
+			int y2 = ((k % sp) + 1) * block_edge_size;
+			for (int i = x1; i < x2; ++i) {
+				for (int j = y1; j < y2; ++j) {
+					C[i][j] = c[(i - x1) * block_edge_size + j - y1];
+				}
+			}
+		}
+		MPI_Barrier(MPI_COMM_WORLD);
+		te = MPI_Wtime();
+		cout << "并行时间：" << (te - tb) << "\n";
+		// 一致性检验
+		bool isConsistent = true;
+		for (int i = 0; i < m; ++i) {
+			for (int j = 0; j < m; ++j) {
+				if (!isEqual(C[i][j], C_C[i][j])) {
+					isConsistent = false;
+					break;
+				}
+			}
+		}
+		cout << (isConsistent ? "Consistent" : "inConsistent") << "\n";
+		cout << "串行结果" << endl;
+		for (int i = 0; i < m; ++i) {
+			for (int j = 0; j < m; ++j) {
+				cout << C_C[i][j] << " ";
+			}
+			cout << endl;
+		}
+		cout << "并行结果" << endl;
+		for (int i = 0; i < m; ++i) {
+			for (int j = 0; j < m; ++j) {
+				cout << C[i][j] << " ";
+			}
+			cout << endl;
+		}
+		for (int i = 0; i < m; ++i)
+			delete A[i];
+		delete[] A;
+		for (int i = 0; i < m; ++i)
+			delete B[i];
+		delete[] B;
+		for (int i = 0; i < m; ++i)
+			delete C[i];
+		delete[] C;
+		for (int i = 0; i < m; ++i)
+			delete C_C[i];
+		delete[] C_C;
+	}
+	// 对于0号以外的处理器，最初要做的就是接收数据而已
+	// 后面完成自己的那部分的矩阵乘法运算，发回给0号处理器
+	else {
+		MPI_Recv(a, block_size, MPI_FLOAT, 0, 1, MPI_COMM_WORLD, &status);
+		MPI_Recv(b, block_size, MPI_FLOAT, 0, 2, MPI_COMM_WORLD, &status);
+
+		// 初始化布局, 按照Cannon的偏移方式初始化位置
+		MPI_Sendrecv(a, block_size, MPI_FLOAT, get_cpu_index(cpu_row_index, cpu_col_index - cpu_row_index, sp), 1,
+			tmp_a, block_size, MPI_FLOAT, get_cpu_index(cpu_row_index, cpu_col_index + cpu_row_index, sp), 1, MPI_COMM_WORLD, &status);
+		memcpy(a, tmp_a, block_size * sizeof(double));
+		MPI_Sendrecv(b, block_size, MPI_FLOAT, get_cpu_index(cpu_row_index - cpu_col_index, cpu_col_index, sp), 1,
+			tmp_b, block_size, MPI_FLOAT, get_cpu_index(cpu_row_index + cpu_col_index, cpu_col_index, sp), 1, MPI_COMM_WORLD, &status);
+		memcpy(b, tmp_b, block_size * sizeof(double));
+
+		// 接下来就是每计算一次后，按照Cannon的方式循环左移和上移，一共进行sp次
+		double total = 0;
+		for (int l = 0; l < sp; l++) {
+			// 小规模的矩阵乘法运算
+			for (int i = 0; i < block_edge_size; ++i) {
+				for (int j = 0; j < block_edge_size; ++j) {
+					total = c[i * block_edge_size + j];
+					for (int k = 0; k < block_edge_size; ++k) {
+						total += a[i * block_edge_size + k] * b[k * block_edge_size + j];
+					}
+					c[i * block_edge_size + j] = total;
+				}
+			}
+			// 将A全部循环左移1位，并更新自己所管理的数据
+			MPI_Sendrecv(a, block_size, MPI_FLOAT, get_cpu_index(cpu_row_index, cpu_col_index - 1, sp), 1,
+				tmp_a, block_size, MPI_FLOAT, get_cpu_index(cpu_row_index, cpu_col_index + 1, sp), 1, MPI_COMM_WORLD, &status);
+			memcpy(a, tmp_a, block_size * sizeof(double));
+			// 将B全部循环上移1位，并更新自己所管理的数据
+			MPI_Sendrecv(b, block_size, MPI_FLOAT, get_cpu_index(cpu_row_index - 1, cpu_col_index, sp), 1,
+				tmp_b, block_size, MPI_FLOAT, get_cpu_index(cpu_row_index + 1, cpu_col_index, sp), 1, MPI_COMM_WORLD, &status);
+			memcpy(b, tmp_b, block_size * sizeof(double));
+		}
+		// 每个处理器将计算的结果发还给0号处理机
+		MPI_Send(c, block_size, MPI_FLOAT, 0, 1, MPI_COMM_WORLD);
+		MPI_Barrier(MPI_COMM_WORLD);
+	}
+	MPI_Finalize();
+	return 0;
+}
