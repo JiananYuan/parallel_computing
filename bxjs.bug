@@ -81,6 +81,7 @@ int main(int argc, char** argv) {
 				if (i >= n || j >= n) {
 					A[i][j] = 0;
 					B[i][j] = 0;
+					continue;
 				}
 				A[i][j] = rand() * 1.0 / RAND_MAX;
 				B[i][j] = rand() * 1.0 / RAND_MAX;
