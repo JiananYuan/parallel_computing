@@ -15,6 +15,7 @@ int main() {
 	int* sum2 = new int[N];
 	srand((unsigned)time(nullptr));
 	int i = 0;
+	omp_set_num_threads(4);
 	#pragma omp parallel shared(a, b) private(i)
 	{
 		#pragma omp for
