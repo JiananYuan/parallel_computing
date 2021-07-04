@@ -1,0 +1,64 @@
+#include <omp.h>
+#include <iostream>
+#include <time.h>
+#include <stdlib.h>
+#include <random>
+#include <math.h>
+using namespace std;
+#define N 1105
+
+double log2(double x) {
+	if (x <= 0) {
+		cout << "error" << "\n";
+		exit(-1);
+	}
+	return log(x) / log(2);
+}
+
+int main() {
+	// init
+	int* arr = new int[N];
+	long long sum1 = 0;
+	long long sum2 = 0;
+	srand((unsigned)time(nullptr));
+	int i = 0;
+	#pragma omp parallel shared(a, b) private(i)
+	{
+		#pragma omp for
+		for (i = 0; i < N; ++i) {
+			arr[i] = rand();
+		}
+	}
+	// serial
+	clock_t start = clock();
+	for (i = 0; i < N; ++i) {
+		sum1 += arr[i];
+	}
+	clock_t end = clock();
+	cout << "serial_time: " << end - start << "\n";
+	// parallel
+	start = clock();
+	int j = 0;
+	// 上取整
+	for (i = 0; i < (int)(ceil(log2(N))); ++i) {
+		#pragma omp parallel shared(arr) private(j)
+		{
+			int step = 1 << i;
+			#pragma omp for
+			for (j = N - 1; j >= step; j -= (step << 1)) {
+				arr[j] += arr[j - step];
+			}
+		}
+	}
+	sum2 = arr[N-1];
+	end = clock();
+	cout << "parallel_time: " << end - start << "\n";
+	// check
+	if (sum1 != sum2) {
+		cout << "inconsistent" << "\n";
+	}
+	cout << "finish...." << "\n";
+	getchar();
+	delete[] arr;
+	return 0;
+}
