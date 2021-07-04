@@ -1,0 +1,43 @@
+#include <omp.h>
+#include <iostream>
+#include <time.h>
+#include <stdlib.h>
+#include <random>
+#include <math.h>
+#include <string.h>
+using namespace std;
+double log2(double x);
+
+int main() {
+	const int n = 18;
+	int arr[] = { 1,2,3,4,5,6,7,8,9,9,8,7,6,5,4,3,2,1};
+	int* tag = new int[n];
+	int x = 5;
+	int i = 0;
+	#pragma omp parallel shared(arr, x) private(i)
+	{
+		#pragma omp for
+		for (i = 0; i < n; ++i) {
+			tag[i] = (arr[i] < x) ? 1 : 0;
+		}
+	}
+	int j = 0;
+	for (i = 0; i < int(ceil(log2(n))); ++i) {
+		#pragma omp parallel shared(tag) private(j)
+		{
+			for (j = n - 1; j >= (1 << i); --j) {
+				tag[j] += tag[j - (1 << i)];
+			}
+		}
+	}
+	cout << "无序矩阵的秩为：" << tag[n-1] << "\n";
+	return 0;
+}
+
+double log2(double x) {
+	if (x <= 0) {
+		cout << "error" << "\n";
+		exit(-1);
+	}
+	return log(x) / log(2);
+}
