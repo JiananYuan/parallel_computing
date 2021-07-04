@@ -1,0 +1,39 @@
+#include <omp.h>
+#include <iostream>
+#include <time.h>
+#include <stdlib.h>
+#include <random>
+#include <math.h>
+#include <string.h>
+#include <algorithm>
+using namespace std;
+double log2(double x);
+
+#define MINUS_INFINATE -0x3f3f3f3f
+#define INFINATE 0x3f3f3f3f
+
+int main() {
+	const int n = 10;
+	int arr[] = { 1,2,3,4,5,6,7,8,9,10 };
+	int rank = 0, x = 5, i = 0;
+	#pragma omp parallel shared(arr, x) private(i)
+	{
+		#pragma omp for
+		for (i = 0; i <= n; ++i) {
+			if (x > arr[i]) {
+				#pragma omp atomic
+				rank = max(rank, i+1);
+			}
+		}
+	}
+	cout << "有序矩阵的秩为：" << rank << "\n";
+	return 0;
+}
+
+double log2(double x) {
+	if (x <= 0) {
+		cout << "error" << "\n";
+		exit(-1);
+	}
+	return log(x) / log(2);
+}
