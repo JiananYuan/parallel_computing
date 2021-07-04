@@ -7,6 +7,8 @@
 using namespace std;
 #define N 1105
 
+// 尤其注意math头文件中的log是以e为底数
+// 因此log2需要手动实现
 double log2(double x) {
 	if (x <= 0) {
 		cout << "error" << "\n";
