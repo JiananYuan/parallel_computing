@@ -1,0 +1,51 @@
+#include <omp.h>
+#include <iostream>
+#include <time.h>
+#include <stdlib.h>
+#include <random>
+#include <math.h>
+#include <string.h>
+using namespace std;
+double log2(double x);
+
+int main() {
+	char str[] = "tencent_alibaba_bytedance_huawei_baidu_google_microsoft_apple";
+	char pat[] = "aba";
+	int str_len = strlen(str);
+	int pat_len = strlen(pat);
+	omp_set_num_threads(8);
+	int i = 0, j = 0;
+	bool isConsistent = true;
+	// 高度并行化，实际中可能不适用
+	#pragma omp parallel shared(str, pat, str_len, pat_len) private(i, j, isConsistent)
+	{
+		#pragma omp for
+		for (i = 0; i <= str_len - pat_len; ++i) {
+			isConsistent = true;
+			#pragma omp parallel shared(str, pat, pat_len) private(i, j)
+			{
+				#pragma omp for
+				for (j = 0; j < pat_len; ++j) {
+					if (str[i + j] != pat[j]) {
+						isConsistent = false;
+						break;
+					}
+				}
+			}
+			// once find a substr, just ok!
+			if (isConsistent) {
+				cout << "found substr in string" << "\n";
+				break;
+			}
+		}
+	}
+	return 0;
+}
+
+double log2(double x) {
+	if (x <= 0) {
+		cout << "error" << "\n";
+		exit(-1);
+	}
+	return log(x) / log(2);
+}
